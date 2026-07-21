@@ -1,0 +1,36 @@
+#!/bin/sh
+# Shared pre-commit checks for the niche-value crate.
+# Enable with: git config core.hooksPath .githooks
+# Bypass the whole hook with `git commit --no-verify` if you must.
+
+# 1. Forbid direct commits to protected branches.
+protected="main master"
+branch="$(git symbolic-ref --short HEAD 2>/dev/null)"
+for b in $protected; do
+	if [ "$branch" = "$b" ]; then
+		echo "pre-commit: direct commits to '$branch' are forbidden." >&2
+		echo "  Create a feature branch:  git switch -c my-change" >&2
+		echo "  (bypass with 'git commit --no-verify' only if you must)" >&2
+		exit 1
+	fi
+done
+
+# Run cargo checks from the repo root (hook may be invoked from a subdir).
+root="$(git rev-parse --show-toplevel)" || exit 1
+cd "$root" || exit 1
+
+# 2. Formatting must be clean.
+echo "pre-commit: cargo fmt --check"
+if ! cargo fmt --all --check; then
+	echo "pre-commit: formatting issues found. Run 'cargo fmt --all', then re-stage." >&2
+	exit 1
+fi
+
+# 3. Clippy with warnings denied, across all features and targets.
+echo "pre-commit: cargo clippy"
+if ! cargo clippy --all-features --all-targets -- -D warnings; then
+	echo "pre-commit: clippy reported issues. Fix them, then commit again." >&2
+	exit 1
+fi
+
+exit 0
