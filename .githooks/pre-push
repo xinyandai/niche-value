@@ -1,0 +1,16 @@
+#!/bin/sh
+# Shared pre-push check for the niche-value crate: run the test suite before
+# anything reaches the remote / CI.
+# Enable with: git config core.hooksPath .githooks
+# Bypass with `git push --no-verify`.
+
+root="$(git rev-parse --show-toplevel)" || exit 1
+cd "$root" || exit 1
+
+echo "pre-push: cargo test --all-features"
+if ! cargo test --all-features; then
+	echo "pre-push: tests failed. Push aborted (bypass with 'git push --no-verify')." >&2
+	exit 1
+fi
+
+exit 0
