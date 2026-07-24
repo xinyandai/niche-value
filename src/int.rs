@@ -240,13 +240,27 @@ macro_rules! widen_niche {
         }
     };
 }
+// Unlike `widen_niche!`, the source here is a *raw* primitive that can equal
+// its own `MAX`. Widening is sound only when the source is **strictly narrower**
+// than the destination: then the widened value is always below the destination's
+// `MAX`, so it can never hit the forbidden pattern and `new_unchecked` can never
+// build a `NonZero(0)` (which would be UB). The `const` assertion enforces that
+// premise at compile time on the target being built, so a future same-width pair
+// (e.g. `u32 -> NonMaxUsize` on a 32-bit target) fails to compile instead of
+// silently invoking UB. Pairs that are only strictly-narrower on *some* pointer
+// widths must additionally be `cfg`-gated at the call site (see below).
 macro_rules! widen_prim {
     ($small:ty, $large:ty) => {
+        const _: () = assert!(
+            core::mem::size_of::<$small>() < core::mem::size_of::<$large>(),
+            "widen_prim! requires the source to be strictly narrower than the destination",
+        );
         impl From<$small> for $large {
             #[inline]
             fn from(small: $small) -> Self {
-                // SAFETY: a smaller primitive widens to a value that cannot be
-                // the larger type's max.
+                // SAFETY: the source is strictly narrower than the destination
+                // (enforced by the const assertion above), so the widened value
+                // is always less than the destination's forbidden `MAX`.
                 unsafe { Self::new_unchecked(small.into()) }
             }
         }
@@ -303,6 +317,10 @@ widen_prim!(u8, NonMaxUsize);
 widen_prim!(u16, NonMaxU32);
 widen_prim!(u16, NonMaxU64);
 widen_prim!(u16, NonMaxU128);
+// `usize` is 16-bit on targets like `msp430`/`avr`, where `u16` is *not*
+// strictly narrower and `u16::MAX` would widen straight to the forbidden
+// `usize::MAX` (UB). Only offer this conversion where the width premise holds.
+#[cfg(not(target_pointer_width = "16"))]
 widen_prim!(u16, NonMaxUsize);
 widen_prim!(u32, NonMaxU64);
 widen_prim!(u32, NonMaxU128);
@@ -317,6 +335,10 @@ widen_prim!(i8, NonMaxIsize);
 widen_prim!(i16, NonMaxI32);
 widen_prim!(i16, NonMaxI64);
 widen_prim!(i16, NonMaxI128);
+// `isize` is 16-bit on targets like `msp430`/`avr`, where `i16` is *not*
+// strictly narrower and `i16::MAX` would widen straight to the forbidden
+// `isize::MAX` (UB). Only offer this conversion where the width premise holds.
+#[cfg(not(target_pointer_width = "16"))]
 widen_prim!(i16, NonMaxIsize);
 widen_prim!(i32, NonMaxI64);
 widen_prim!(i32, NonMaxI128);
@@ -434,8 +456,10 @@ mod tests {
                     assert_eq!((l & r).get(), vanilla);
                 }
                 if let Some(l) = NonMaxU8::new(left) {
-                    assert_eq!((l & right).get(), vanilla);
-                    assert_eq!((left & l).get(), left & left); // primitive & niche
+                    assert_eq!((l & right).get(), vanilla); // niche & primitive
+                }
+                if let Some(r) = NonMaxU8::new(right) {
+                    assert_eq!((left & r).get(), vanilla); // primitive & niche
                 }
             }
         }
@@ -488,6 +512,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "std")] // uses `format!`
     fn fmt_forwards_to_value() {
         let v = NonValueU8::<7>::new(200).unwrap();
         assert_eq!(format!("{v}"), "200");
