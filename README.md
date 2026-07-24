@@ -6,7 +6,8 @@ Numeric types that are known **not** to hold one chosen value — so `Option<T>`
 This is a generalization of [`nonmax`](https://docs.rs/nonmax): where `nonmax`
 forbids the *maximum* value, `niche-value` forbids an *arbitrary* value chosen
 with a const generic, and additionally supports `f32`/`f64`, including
-niche-optimized "not NaN" and "not infinite" types.
+niche-optimized "not NaN", "not infinite", "finite", "nonzero", and
+"non-subnormal" types.
 
 ```rust
 use niche_value::{NonValueU8, NonMaxU8, NonNanF32};
@@ -57,9 +58,18 @@ is a drop-in superset: `use nonmax::NonMaxU8` → `use niche_value::NonMaxU8`.
 | `NonMaxF32`, `NonMinF32`, … | `T::MAX` / `T::MIN` (bit-exact) | no¹ |
 | `NonNanF32`, `NonNanF64` | **every** `NaN` bit pattern | **yes** |
 | `NonInfF32`, `NonInfF64` | both infinities | no¹ |
+| `NonZeroF32`, `NonZeroF64` | **both** zeros (`+0.0` *and* `-0.0`) | no¹ |
+| `FiniteF32`, `FiniteF64` | `NaN` **and** both infinities | **yes** |
+| `NonSubnormalF32`, `NonSubnormalF64` | subnormals | no¹ |
 
 ¹ These can still hold `NaN`, so only `PartialEq`/`PartialOrd` (by value,
 matching the primitive) are provided.
+
+`FiniteF*` (= `NonNan*` ∩ `NonInf*`) can never hold `NaN`, so like `NonNan*` it
+gets a total `Ord`/`Eq`/`Hash` (with the same `-0.0`-normalized `Hash`).
+`NonZeroF*` rejects zero as a **class** — both `+0.0` and `-0.0` — which is
+distinct from the bit-exact `NonValueF32<0x0000_0000>` that forbids only `+0.0`
+and leaves `-0.0` valid.
 
 `NonNan*` is the highlight: because it can never hold `NaN`, it implements a
 total `Ord`/`Eq`/`Hash` — a **niche-optimized `NotNan`**, something

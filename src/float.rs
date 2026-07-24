@@ -3,9 +3,11 @@
 //! Two families:
 //! * **bit-exact** — [`NonValueF32`]/[`NonValueF64`], forbidding one bit pattern
 //!   (const generic `BITS`), plus the `NonMax*`/`NonMin*` aliases.
-//! * **class-based** — [`NonNanF32`], [`NonInfF32`], … which reject a whole
-//!   semantic class at construction while anchoring their niche on one
-//!   representative pattern.
+//! * **class-based** — [`NonNanF32`], [`NonInfF32`], [`NonZeroF32`],
+//!   [`FiniteF32`], [`NonSubnormalF32`], … which reject a whole semantic class
+//!   at construction while anchoring their niche on one representative pattern.
+//!   [`NonNanF32`]/[`FiniteF32`] can never hold `NaN`, so they alone get a total
+//!   [`Ord`]/[`Eq`]/[`Hash`].
 //!
 //! Rejection is always by **bit pattern**, never by mathematical value (forced
 //! by soundness: a value check would let a `NaN` equal to the anchor slip
@@ -144,7 +146,7 @@ niche_float!(NonValueF64, f64, u64, NonZeroU64, NonMaxF64, NonMinF64);
 macro_rules! niche_float_class {
     (
         $ty:ident, $prim:ident, $bits:ident, $nonzero:ident,
-        anchor = $anchor:expr, reject = $reject:ident, what = $what:literal
+        anchor = $anchor:expr, reject = $reject:expr, what = $what:literal
     ) => {
         #[doc = concat!("An [`", stringify!($prim), "`] guaranteed not to be ", $what, ".")]
         ///
@@ -161,7 +163,8 @@ macro_rules! niche_float_class {
             #[doc = concat!("Creates a value if it is not ", $what, ", otherwise `None`.")]
             #[inline]
             pub fn new(value: $prim) -> Option<Self> {
-                if value.$reject() {
+                #[allow(clippy::redundant_closure_call)]
+                if ($reject)(value) {
                     return None;
                 }
                 // The predicate guarantees `value.to_bits() != ANCHOR` (the
@@ -309,7 +312,7 @@ niche_float_class!(
     u32,
     NonZeroU32,
     anchor = 0x7FC0_0000,
-    reject = is_nan,
+    reject = |v: f32| v.is_nan(),
     what = "`NaN`"
 );
 niche_float_class!(
@@ -318,7 +321,7 @@ niche_float_class!(
     u64,
     NonZeroU64,
     anchor = 0x7FF8_0000_0000_0000,
-    reject = is_nan,
+    reject = |v: f64| v.is_nan(),
     what = "`NaN`"
 );
 impl_total_ord!(NonNanF32, f32);
@@ -330,7 +333,7 @@ niche_float_class!(
     u32,
     NonZeroU32,
     anchor = 0x7F80_0000,
-    reject = is_infinite,
+    reject = |v: f32| v.is_infinite(),
     what = "infinite"
 );
 niche_float_class!(
@@ -339,11 +342,74 @@ niche_float_class!(
     u64,
     NonZeroU64,
     anchor = 0x7FF0_0000_0000_0000,
-    reject = is_infinite,
+    reject = |v: f64| v.is_infinite(),
     what = "infinite"
 );
 impl_partial_ord!(NonInfF32);
 impl_partial_ord!(NonInfF64);
+
+niche_float_class!(
+    NonZeroF32,
+    f32,
+    u32,
+    NonZeroU32,
+    anchor = 0x0000_0000,
+    reject = |v: f32| v == 0.0,
+    what = "zero"
+);
+niche_float_class!(
+    NonZeroF64,
+    f64,
+    u64,
+    NonZeroU64,
+    anchor = 0x0000_0000_0000_0000,
+    reject = |v: f64| v == 0.0,
+    what = "zero"
+);
+impl_partial_ord!(NonZeroF32);
+impl_partial_ord!(NonZeroF64);
+
+niche_float_class!(
+    FiniteF32,
+    f32,
+    u32,
+    NonZeroU32,
+    anchor = 0x7FC0_0000,
+    reject = |v: f32| !v.is_finite(),
+    what = "non-finite (`NaN` or infinite)"
+);
+niche_float_class!(
+    FiniteF64,
+    f64,
+    u64,
+    NonZeroU64,
+    anchor = 0x7FF8_0000_0000_0000,
+    reject = |v: f64| !v.is_finite(),
+    what = "non-finite (`NaN` or infinite)"
+);
+impl_total_ord!(FiniteF32, f32);
+impl_total_ord!(FiniteF64, f64);
+
+niche_float_class!(
+    NonSubnormalF32,
+    f32,
+    u32,
+    NonZeroU32,
+    anchor = 0x0000_0001,
+    reject = |v: f32| v.is_subnormal(),
+    what = "subnormal"
+);
+niche_float_class!(
+    NonSubnormalF64,
+    f64,
+    u64,
+    NonZeroU64,
+    anchor = 0x0000_0000_0000_0001,
+    reject = |v: f64| v.is_subnormal(),
+    what = "subnormal"
+);
+impl_partial_ord!(NonSubnormalF32);
+impl_partial_ord!(NonSubnormalF64);
 
 #[cfg(test)]
 mod tests {
@@ -419,6 +485,87 @@ mod tests {
         // but get() is lossless on the sign bit
         assert!(pos.get().is_sign_positive());
         assert!(neg.get().is_sign_negative());
+    }
+
+    #[test]
+    fn nonzero_rejects_both_signed_zeros_but_keeps_nan() {
+        // Both +0.0 and -0.0 are rejected as a *class* (unlike bit-exact
+        // NonValueF32<0x0000_0000>, which forbids only +0.0).
+        assert!(NonZeroF32::new(0.0).is_none());
+        assert!(NonZeroF32::new(-0.0).is_none());
+        assert!(NonZeroF64::new(0.0).is_none());
+        assert!(NonZeroF64::new(-0.0).is_none());
+        // nonzero values (including NaN and infinities) round-trip
+        assert_eq!(NonZeroF32::new(1.5).unwrap().get(), 1.5);
+        assert_eq!(NonZeroF32::new(-2.0).unwrap().get(), -2.0);
+        assert_eq!(
+            NonZeroF32::new(f32::MIN_POSITIVE).unwrap().get(),
+            f32::MIN_POSITIVE
+        );
+        assert!(NonZeroF64::new(f64::NAN).unwrap().get().is_nan());
+        assert_eq!(NonZeroF32::new(f32::INFINITY).unwrap().get(), f32::INFINITY);
+        assert_eq!(size_of::<Option<NonZeroF32>>(), size_of::<f32>());
+        assert_eq!(size_of::<Option<NonZeroF64>>(), size_of::<f64>());
+    }
+
+    #[test]
+    fn finite_rejects_nan_and_both_infinities() {
+        // Finite = NonNan ∩ NonInf: rejects the whole non-finite class.
+        assert!(FiniteF32::new(f32::NAN).is_none());
+        assert!(FiniteF32::new(f32::from_bits(0x7F80_0001)).is_none()); // another NaN
+        assert!(FiniteF32::new(f32::INFINITY).is_none());
+        assert!(FiniteF32::new(f32::NEG_INFINITY).is_none());
+        assert!(FiniteF64::new(f64::NAN).is_none());
+        assert!(FiniteF64::new(f64::INFINITY).is_none());
+        assert!(FiniteF64::new(f64::NEG_INFINITY).is_none());
+        // finite values (including subnormals and zeros) round-trip
+        assert_eq!(FiniteF32::new(1.5).unwrap().get(), 1.5);
+        assert_eq!(FiniteF64::new(-2.5).unwrap().get(), -2.5);
+        assert_eq!(FiniteF32::new(0.0).unwrap().get(), 0.0);
+        assert_eq!(size_of::<Option<FiniteF32>>(), size_of::<f32>());
+        assert_eq!(size_of::<Option<FiniteF64>>(), size_of::<f64>());
+    }
+
+    #[test]
+    fn finite_is_totally_ordered_and_hashable() {
+        use std::collections::{BTreeSet, HashSet};
+        let a = FiniteF64::new(-1.0).unwrap();
+        let b = FiniteF64::new(0.0).unwrap();
+        let c = FiniteF64::new(2.5).unwrap();
+        assert!(a < b && b < c);
+
+        let mut set: BTreeSet<FiniteF64> = BTreeSet::new();
+        set.insert(c);
+        set.insert(a);
+        set.insert(b);
+        let sorted: Vec<f64> = set.iter().map(|x| x.get()).collect();
+        assert_eq!(sorted, vec![-1.0, 0.0, 2.5]);
+
+        // +0.0 and -0.0 compare and hash equal, but get() keeps the sign.
+        let mut hs: HashSet<FiniteF32> = HashSet::new();
+        assert!(hs.insert(FiniteF32::new(0.0).unwrap()));
+        assert!(!hs.insert(FiniteF32::new(-0.0).unwrap()));
+        assert_eq!(FiniteF32::new(0.0).unwrap(), FiniteF32::new(-0.0).unwrap());
+        assert!(FiniteF32::new(-0.0).unwrap().get().is_sign_negative());
+    }
+
+    #[test]
+    fn nonsubnormal_rejects_subnormals_but_keeps_nan_zero_and_normals() {
+        // Smallest positive subnormal and a mid-range subnormal are rejected.
+        assert!(NonSubnormalF32::new(f32::from_bits(0x0000_0001)).is_none());
+        assert!(NonSubnormalF32::new(f32::from_bits(0x0040_0000)).is_none()); // larger subnormal
+        assert!(NonSubnormalF64::new(f64::from_bits(0x0000_0000_0000_0001)).is_none());
+        // -0.0/+0.0 are NOT subnormal, so allowed; NaN allowed; normals allowed.
+        assert_eq!(NonSubnormalF32::new(0.0).unwrap().get(), 0.0);
+        assert!(NonSubnormalF32::new(-0.0).unwrap().get().is_sign_negative());
+        assert!(NonSubnormalF64::new(f64::NAN).unwrap().get().is_nan());
+        assert_eq!(
+            NonSubnormalF32::new(f32::MIN_POSITIVE).unwrap().get(),
+            f32::MIN_POSITIVE
+        );
+        assert_eq!(NonSubnormalF64::new(1.5).unwrap().get(), 1.5);
+        assert_eq!(size_of::<Option<NonSubnormalF32>>(), size_of::<f32>());
+        assert_eq!(size_of::<Option<NonSubnormalF64>>(), size_of::<f64>());
     }
 
     #[test]

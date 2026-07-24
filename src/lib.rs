@@ -36,11 +36,13 @@
 //! Float types reject by **bit pattern**, not by mathematical value (this is
 //! forced by soundness — see the crate README). Consequences: `+0.0` and `-0.0`
 //! are distinct, and [`NonValueF32<BITS>`] forbids exactly one bit pattern.
-//! The class-based [`NonNanF32`]/[`NonInfF32`] reject the whole `NaN` / infinite
-//! class at construction while anchoring their niche on one representative
-//! pattern. Because [`NonNanF32`] can never hold `NaN`, it is the only float
-//! family that implements total [`Ord`]/[`Eq`]/[`Hash`] — a niche-optimized
-//! `NotNan`.
+//! The class-based [`NonNanF32`]/[`NonInfF32`]/[`NonZeroF32`]/[`FiniteF32`]/
+//! [`NonSubnormalF32`] reject a whole semantic class at construction while
+//! anchoring their niche on one representative pattern. Because [`NonNanF32`] and
+//! [`FiniteF32`] can never hold `NaN`, they are the float types that implement
+//! total [`Ord`]/[`Eq`]/[`Hash`] — a niche-optimized `NotNan` / `Finite`.
+//! Note that [`NonZeroF32`] rejects zero as a *class* (both `+0.0` and `-0.0`),
+//! unlike the bit-exact [`NonValueF32<BITS>`], which forbids a single pattern.
 //!
 //! # Features
 //!
