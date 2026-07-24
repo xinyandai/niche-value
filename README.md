@@ -76,13 +76,22 @@ total `Ord`/`Eq`/`Hash` — a **niche-optimized `NotNan`**, something
 `ordered-float`/`decorum` don't give you. `+0.0`/`-0.0` compare and hash equal
 (`-0.0` is normalized only inside `Hash`), while `get()` round-trips the sign.
 
-## Float semantics: bit-pattern, not value
+## Float semantics: anchors and soundness
 
-Floats reject by **bit pattern**, never by mathematical value. This is forced by
-soundness — a value check would let a `NaN` equal to the forbidden pattern slip
-through (`NaN != NaN`) and form an unsound `NonZero(0)`. Two consequences:
+Bit-exact float types reject by **bit pattern** (`to_bits() == BITS`).
+Class-based types reject a whole **semantic class** by value (`is_nan()`,
+`== 0.0`, `is_infinite()`, `is_subnormal()`) while anchoring their niche on one
+representative pattern *drawn from that class* — so the anchor is itself rejected
+and can never be constructed, keeping the `NonZero` niche sound.
 
-- `+0.0` and `-0.0` are **distinct** patterns; forbidding one permits the other.
+A value predicate is sound only when the anchor compares equal to itself.
+`+0.0 == +0.0`, so `NonZeroF*` rejects with `== 0.0`. But `NaN != NaN`, so a
+`== NaN` check would let the anchor slip through and form an unsound
+`NonZero(0)`; `NonNan*` therefore rejects with `is_nan()`, catching *every* `NaN`
+pattern including its own anchor. Two consequences:
+
+- `+0.0` and `-0.0` are **distinct** bit patterns; a bit-exact type forbidding
+  one permits the other, while `NonZeroF*` rejects both as a class.
 - `NonValueF32<BITS>` forbids exactly **one** bit pattern. To reject *all* `NaN`
   or *all* infinities, use the class-based `NonNan*` / `NonInf*` types.
 
@@ -97,7 +106,9 @@ compiler features and are out of scope; this crate is stable-only.
 ## Features
 
 - `std` (default) — implements `std::error::Error` for the error types.
-- `serde` — `Serialize`/`Deserialize` for every type.
+- `serde` — `Serialize`/`Deserialize` for every type. Floats (de)serialize by
+  value like the primitive; exact bit identity (NaN payload, signed zero)
+  survives only on IEEE-bit-preserving formats such as bincode.
 
 Disable default features for `#![no_std]`.
 

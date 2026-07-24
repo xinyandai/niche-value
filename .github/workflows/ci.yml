@@ -18,7 +18,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --all-features
       - run: cargo test # default features (std, no serde)
-      - run: cargo build --no-default-features # no_std lib builds (tests need std)
+      - run: cargo build --no-default-features # pure no_std lib (no test harness)
+      - run: cargo test --no-default-features # core tests under no_std (std-only tests are gated)
 
   msrv:
     name: build (MSRV 1.83)

@@ -9,10 +9,37 @@
 //!   [`NonNanF32`]/[`FiniteF32`] can never hold `NaN`, so they alone get a total
 //!   [`Ord`]/[`Eq`]/[`Hash`].
 //!
-//! Rejection is always by **bit pattern**, never by mathematical value (forced
-//! by soundness: a value check would let a `NaN` equal to the anchor slip
-//! through, forming an unsound `NonZero(0)`). Consequences: `+0.0` and `-0.0`
-//! are distinct bit patterns, and a bit-exact type forbids exactly one of them.
+//! # Anchors and the soundness rule
+//!
+//! Every type stores `value.to_bits() ^ ANCHOR` in a [`core::num::NonZero`], so
+//! the niche survives exactly as long as no *constructible* value can have
+//! `to_bits() == ANCHOR`. The two families guarantee that differently:
+//!
+//! * **bit-exact** types reject by **bit pattern** (`to_bits() == BITS`): the one
+//!   forbidden pattern is the anchor and nothing else is touched. A consequence
+//!   is that `+0.0` and `-0.0` are distinct patterns — forbidding one leaves the
+//!   other valid — and a bit-exact type forbids exactly one of them.
+//! * **class-based** types reject by **value / semantics** (`is_nan()`,
+//!   `== 0.0`, `is_subnormal()`, …) and anchor on one representative pattern
+//!   *drawn from the rejected class*, so the anchor is itself rejected and hence
+//!   never constructible.
+//!
+//! A value predicate is sound only when the anchor compares **equal to itself**.
+//! `+0.0 == +0.0`, so [`NonZeroF32`] may reject with `value == 0.0` (its anchor
+//! is `+0.0`). `NaN != NaN`, so a `value == NaN` check would let the anchor slip
+//! through and form an unsound `NonZero(0)`; [`NonNanF32`] must instead reject
+//! with `is_nan()`, which classifies *every* `NaN` pattern, the anchor included.
+//!
+//! # Serde
+//!
+//! Float (de)serialization uses the primitive's own representation, so a round
+//! trip reproduces the mathematical **value**, matching `f32`/`f64`. Exact bit
+//! identity — a specific `NaN` payload, or the sign of a zero — survives only on
+//! formats that preserve IEEE-754 bits (e.g. `bincode`). Under a format that
+//! canonicalizes `NaN` or flushes signed zero, a bit-exact `NonValueF*` whose
+//! forbidden pattern is such a value can even *fail* to deserialize, since the
+//! checked constructor rejects the mangled bits. Serialize `to_bits()` yourself
+//! if you need format-independent bit fidelity.
 
 use crate::error::{ParseFloatError, TryFromFloatError};
 
@@ -416,6 +443,38 @@ mod tests {
     use super::*;
     use core::mem::size_of;
 
+    // Shared contract checks for the NaN-free float types: a total `Ord` and the
+    // `-0.0`-normalized `Hash`. Both `NonNan*` and `Finite*` must satisfy them,
+    // so exercising them through one helper stops a future contract change from
+    // leaving either type under-tested.
+    #[cfg(feature = "std")]
+    fn assert_total_order_f64<T: Ord + Copy>(new: impl Fn(f64) -> T, get: impl Fn(&T) -> f64) {
+        use std::collections::BTreeSet;
+        let a = new(-1.0);
+        let b = new(0.0);
+        let c = new(2.5);
+        assert!(a < b && b < c);
+
+        let mut set: BTreeSet<T> = BTreeSet::new();
+        set.insert(c);
+        set.insert(a);
+        set.insert(b);
+        let sorted: Vec<f64> = set.iter().map(get).collect();
+        assert_eq!(sorted, vec![-1.0, 0.0, 2.5]);
+    }
+
+    #[cfg(feature = "std")]
+    fn assert_signed_zero_eq_hash_f32<T: Eq + core::hash::Hash + Copy + core::fmt::Debug>(
+        new: impl Fn(f32) -> T,
+    ) {
+        use std::collections::HashSet;
+        // +0.0 and -0.0 compare and hash equal, so -0.0 must collide in the set.
+        let mut hs: HashSet<T> = HashSet::new();
+        assert!(hs.insert(new(0.0)));
+        assert!(!hs.insert(new(-0.0)));
+        assert_eq!(new(0.0), new(-0.0));
+    }
+
     #[test]
     fn bit_exact_rejection_and_roundtrip() {
         assert_eq!(NonMaxF32::new(1.5).unwrap().get(), 1.5);
@@ -455,25 +514,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "std")] // ordered/hashed containers
     fn nonnan_is_totally_ordered_and_hashable() {
-        use std::collections::{BTreeSet, HashSet};
-        let a = NonNanF64::new(-1.0).unwrap();
-        let b = NonNanF64::new(0.0).unwrap();
-        let c = NonNanF64::new(2.5).unwrap();
-        assert!(a < b && b < c);
-
-        // usable as ordered / hashed keys
-        let mut set: BTreeSet<NonNanF64> = BTreeSet::new();
-        set.insert(c);
-        set.insert(a);
-        set.insert(b);
-        let sorted: Vec<f64> = set.iter().map(|x| x.get()).collect();
-        assert_eq!(sorted, vec![-1.0, 0.0, 2.5]);
-
-        let mut hs: HashSet<NonNanF32> = HashSet::new();
-        assert!(hs.insert(NonNanF32::new(0.0).unwrap()));
-        // -0.0 is value-equal to +0.0 and must collide in the set
-        assert!(!hs.insert(NonNanF32::new(-0.0).unwrap()));
+        assert_total_order_f64(|v| NonNanF64::new(v).unwrap(), |x| x.get());
+        assert_signed_zero_eq_hash_f32(|v| NonNanF32::new(v).unwrap());
     }
 
     #[test]
@@ -527,25 +571,11 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "std")] // ordered/hashed containers
     fn finite_is_totally_ordered_and_hashable() {
-        use std::collections::{BTreeSet, HashSet};
-        let a = FiniteF64::new(-1.0).unwrap();
-        let b = FiniteF64::new(0.0).unwrap();
-        let c = FiniteF64::new(2.5).unwrap();
-        assert!(a < b && b < c);
-
-        let mut set: BTreeSet<FiniteF64> = BTreeSet::new();
-        set.insert(c);
-        set.insert(a);
-        set.insert(b);
-        let sorted: Vec<f64> = set.iter().map(|x| x.get()).collect();
-        assert_eq!(sorted, vec![-1.0, 0.0, 2.5]);
-
+        assert_total_order_f64(|v| FiniteF64::new(v).unwrap(), |x| x.get());
+        assert_signed_zero_eq_hash_f32(|v| FiniteF32::new(v).unwrap());
         // +0.0 and -0.0 compare and hash equal, but get() keeps the sign.
-        let mut hs: HashSet<FiniteF32> = HashSet::new();
-        assert!(hs.insert(FiniteF32::new(0.0).unwrap()));
-        assert!(!hs.insert(FiniteF32::new(-0.0).unwrap()));
-        assert_eq!(FiniteF32::new(0.0).unwrap(), FiniteF32::new(-0.0).unwrap());
         assert!(FiniteF32::new(-0.0).unwrap().get().is_sign_negative());
     }
 
@@ -555,6 +585,9 @@ mod tests {
         assert!(NonSubnormalF32::new(f32::from_bits(0x0000_0001)).is_none());
         assert!(NonSubnormalF32::new(f32::from_bits(0x0040_0000)).is_none()); // larger subnormal
         assert!(NonSubnormalF64::new(f64::from_bits(0x0000_0000_0000_0001)).is_none());
+        // Negative subnormals (sign bit set) are subnormal too, so also rejected.
+        assert!(NonSubnormalF32::new(f32::from_bits(0x8000_0001)).is_none());
+        assert!(NonSubnormalF64::new(f64::from_bits(0x8000_0000_0000_0001)).is_none());
         // -0.0/+0.0 are NOT subnormal, so allowed; NaN allowed; normals allowed.
         assert_eq!(NonSubnormalF32::new(0.0).unwrap().get(), 0.0);
         assert!(NonSubnormalF32::new(-0.0).unwrap().get().is_sign_negative());
@@ -578,6 +611,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "std")] // uses `format!`
     fn fmt_and_parse() {
         let v = NonNanF64::new(1.5).unwrap();
         assert_eq!(format!("{v}"), "1.5");
@@ -594,5 +628,23 @@ mod tests {
         let bytes = bincode::serialize(&v).unwrap();
         let back: NonNanF64 = bincode::deserialize(&bytes).unwrap();
         assert_eq!(v, back);
+    }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    fn serde_signed_zero_and_nan_payload() {
+        // bincode preserves IEEE-754 bits, so the value-based serde impls keep
+        // signed zero and specific NaN payloads exact across a round trip.
+        let neg_zero = NonValueF32::<0x0000_0000>::new(-0.0).unwrap();
+        let bytes = bincode::serialize(&neg_zero).unwrap();
+        let back: NonValueF32<0x0000_0000> = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(back.get().to_bits(), 0x8000_0000);
+        assert!(back.get().is_sign_negative());
+
+        // A payloaded NaN (not `f32::MAX`) survives a bit-preserving round trip.
+        let payload_nan = NonMaxF32::new(f32::from_bits(0x7F80_0001)).unwrap();
+        let bytes = bincode::serialize(&payload_nan).unwrap();
+        let back: NonMaxF32 = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(back.get().to_bits(), 0x7F80_0001);
     }
 }
