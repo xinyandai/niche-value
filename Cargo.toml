@@ -20,6 +20,8 @@ bincode = "1.3"
 
 [features]
 default = ["std"]
+# No-op, kept so downstream `features = ["std"]` keeps compiling. The crate is
+# always `no_std`; `core::error::Error` is implemented unconditionally.
 std = []
 serde = ["dep:serde"]
 

@@ -39,9 +39,10 @@ gh pr create
 
 ## Checks run in CI
 
-CI (`.github/workflows/ci.yml`) runs, and PRs must pass: tests (stable),
-`build` on the MSRV (1.83), `rustfmt`, `clippy` (warnings denied), Miri, and
-docs. Running the hooks locally keeps you ahead of CI.
+CI (`.github/workflows/ci.yml`) runs, and PRs must pass: tests (stable, with
+every feature combination), `build` on the MSRV (1.83), `rustfmt`, `clippy`
+(warnings denied), Miri, and docs. Running the hooks locally keeps you ahead of
+CI.
 
 ## Manual commands
 

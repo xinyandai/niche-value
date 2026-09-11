@@ -3,20 +3,6 @@
 
 use crate::error::{ParseIntError, TryFromIntError};
 
-/// Generate the six standard integer formatting impls, forwarding to `get()`.
-macro_rules! int_fmt {
-    ($nv:ident, $prim:ident, $($Trait:ident),+ $(,)?) => {
-        $(
-            impl<const N: $prim> core::fmt::$Trait for $nv<N> {
-                #[inline]
-                fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-                    core::fmt::$Trait::fmt(&self.get(), f)
-                }
-            }
-        )+
-    };
-}
-
 macro_rules! niche_int {
     (@common $nv:ident, $nonzero:ident, $prim:ident, $nonmax:ident, $nonmin:ident) => {
         #[doc = concat!("An [`", stringify!($prim), "`] that is known not to equal the const value `N`.")]
@@ -68,42 +54,25 @@ macro_rules! niche_int {
             }
         }
 
-        impl<const N: $prim> From<$nv<N>> for $prim {
+        forward_conversions!([const N: $prim] $nv<N>, $prim, TryFromIntError, ParseIntError);
+        forward_fmt!([const N: $prim] $nv<N> => Debug, Display, Binary, Octal, LowerHex, UpperHex);
+        forward_serde!([const N: $prim] $nv<N>, $prim, "value is forbidden by niche type");
+
+        // Interop with `core::num::NonZero*`: forbidding `0` is exactly
+        // "non-zero", so `NonValue*<0>` and the standard library's `NonZero*`
+        // bridge both ways, infallibly. (For unsigned widths `NonValue*<0>` is
+        // also the `NonMin*` alias.)
+        impl From<core::num::$nonzero> for $nv<0> {
             #[inline]
-            fn from(value: $nv<N>) -> Self {
-                value.get()
+            fn from(value: core::num::$nonzero) -> Self {
+                // The inner encoding is `value ^ 0 == value`.
+                Self(value)
             }
         }
-
-        impl<const N: $prim> core::convert::TryFrom<$prim> for $nv<N> {
-            type Error = TryFromIntError;
+        impl From<$nv<0>> for core::num::$nonzero {
             #[inline]
-            fn try_from(value: $prim) -> Result<Self, Self::Error> {
-                Self::new(value).ok_or(TryFromIntError(()))
-            }
-        }
-
-        impl<const N: $prim> core::str::FromStr for $nv<N> {
-            type Err = ParseIntError;
-            #[inline]
-            fn from_str(value: &str) -> Result<Self, Self::Err> {
-                Self::new(<$prim as core::str::FromStr>::from_str(value)?).ok_or(ParseIntError(()))
-            }
-        }
-
-        int_fmt!($nv, $prim, Debug, Display, Binary, Octal, LowerHex, UpperHex);
-
-        #[cfg(feature = "serde")]
-        impl<const N: $prim> serde::Serialize for $nv<N> {
-            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-                self.get().serialize(serializer)
-            }
-        }
-        #[cfg(feature = "serde")]
-        impl<'de, const N: $prim> serde::Deserialize<'de> for $nv<N> {
-            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-                let value = <$prim as serde::Deserialize>::deserialize(deserializer)?;
-                Self::new(value).ok_or_else(|| serde::de::Error::custom("value is forbidden by niche type"))
+            fn from(value: $nv<0>) -> Self {
+                value.0
             }
         }
 
@@ -127,8 +96,7 @@ macro_rules! niche_int {
         impl Default for $nv<{ $prim::MAX }> {
             #[inline]
             fn default() -> Self {
-                // SAFETY: 0 != MAX for every width.
-                unsafe { Self::new_unchecked(0) }
+                Self::ZERO
             }
         }
 
@@ -149,10 +117,7 @@ macro_rules! niche_int {
             }
         }
 
-        const _: () = {
-            assert!(core::mem::size_of::<$nonmax>() == core::mem::size_of::<$prim>());
-            assert!(core::mem::size_of::<Option<$nonmax>>() == core::mem::size_of::<$prim>());
-        };
+        assert_niche_layout!($nonmax, $prim);
     };
 
     (signed $nv:ident, $nonzero:ident, $prim:ident, $nonmax:ident, $nonmin:ident) => {
@@ -164,6 +129,7 @@ macro_rules! niche_int {
 
         // For unsigned only, one operand may be a raw primitive: ANDing a
         // non-MAX (which has a zero bit) with anything keeps that zero bit.
+        // (Signed is excluded: `-1 & MAX == MAX`.)
         impl core::ops::BitAnd<$prim> for $nv<{ $prim::MAX }> {
             type Output = Self;
             #[inline]
@@ -192,24 +158,6 @@ macro_rules! niche_int {
                 *self = *self & rhs.get();
             }
         }
-
-        // Interop with `core::num::NonZero*`: for unsigned types, forbidding the
-        // minimum (0) is exactly "non-zero", so `NonMin* == NonValue*<0>` and
-        // the standard library's `NonZero*` bridge both ways, infallibly.
-        impl From<core::num::$nonzero> for $nv<0> {
-            #[inline]
-            fn from(value: core::num::$nonzero) -> Self {
-                // A non-zero value is a valid `NonValue<0>`; the inner encoding
-                // is `value ^ 0 == value`.
-                Self(value)
-            }
-        }
-        impl From<$nv<0>> for core::num::$nonzero {
-            #[inline]
-            fn from(value: $nv<0>) -> Self {
-                value.0
-            }
-        }
     };
 }
 
@@ -228,6 +176,11 @@ niche_int!(unsigned NonValueU128, NonZeroU128, u128, NonMaxU128, NonMinU128);
 niche_int!(unsigned NonValueUsize, NonZeroUsize, usize, NonMaxUsize, NonMinUsize);
 
 // ---- Widening `From` conversions between `NonMax*` types (nonmax parity) ----
+//
+// The source is itself non-MAX, so its widened value is at most
+// `small::MAX - 1`, which is strictly below the destination's `MAX` whenever the
+// destination is at least as wide (and the same width is fine too, since the
+// value is *already* below that `MAX`).
 macro_rules! widen_niche {
     ($small:ty, $large:ty) => {
         impl From<$small> for $large {
@@ -361,6 +314,7 @@ widen_prim!(u64, NonMaxI128);
 mod tests {
     use super::*;
     use core::mem::size_of;
+    use std::format;
 
     #[test]
     fn generic_forbidden_value() {
@@ -434,6 +388,7 @@ mod tests {
         assert_eq!(NonMaxU8::MAX.get(), 254);
         assert_eq!(NonMaxU8::default().get(), 0);
         assert_eq!(NonMaxI16::MAX.get(), i16::MAX - 1);
+        assert_eq!(NonMaxI8::default(), NonMaxI8::ZERO);
     }
 
     #[test]
@@ -445,6 +400,11 @@ mod tests {
         assert!(one < big);
         // NonMax stores !value, which reverses bit order; ensure Ord ignores that.
         assert!(big > one);
+
+        // Signed: negative values sort below positive ones despite the sign bit.
+        let neg = NonMaxI8::new(-5).unwrap();
+        let pos = NonMaxI8::new(5).unwrap();
+        assert!(neg < pos);
     }
 
     #[test]
@@ -489,11 +449,14 @@ mod tests {
         assert_eq!(large.get(), 200);
         let from_prim: NonMaxU16 = 200u8.into();
         assert_eq!(from_prim.get(), 200);
+        // a primitive at its own MAX widens to a valid (non-MAX) larger value
+        let widened_max: NonMaxU16 = u8::MAX.into();
+        assert_eq!(widened_max.get(), 255);
     }
 
     #[test]
     fn nonzero_interop() {
-        use core::num::NonZeroU16;
+        use core::num::{NonZeroI32, NonZeroU16};
         let nz = NonZeroU16::new(42).unwrap();
         // NonMinU16 == NonValueU16<0> == "non-zero u16"
         let nm: NonMinU16 = nz.into();
@@ -501,6 +464,13 @@ mod tests {
         let back: NonZeroU16 = nm.into();
         assert_eq!(back.get(), 42);
         assert!(NonMinU16::new(0).is_none());
+
+        // Signed: NonValueI32<0> == "non-zero i32" as well.
+        let nz = NonZeroI32::new(-7).unwrap();
+        let nv: NonValueI32<0> = nz.into();
+        assert_eq!(nv.get(), -7);
+        assert_eq!(NonZeroI32::from(nv), nz);
+        assert!(NonValueI32::<0>::new(0).is_none());
     }
 
     #[test]
@@ -509,16 +479,18 @@ mod tests {
         assert_eq!(v.get(), 3);
         "7".parse::<NonValueU8<7>>().unwrap_err();
         "300".parse::<NonMaxU8>().unwrap_err();
+        "abc".parse::<NonMaxU8>().unwrap_err();
     }
 
     #[test]
-    #[cfg(feature = "std")] // uses `format!`
     fn fmt_forwards_to_value() {
         let v = NonValueU8::<7>::new(200).unwrap();
         assert_eq!(format!("{v}"), "200");
         assert_eq!(format!("{v:?}"), "200");
         assert_eq!(format!("{v:b}"), format!("{:b}", 200u8));
+        assert_eq!(format!("{v:o}"), format!("{:o}", 200u8));
         assert_eq!(format!("{v:x}"), format!("{:x}", 200u8));
+        assert_eq!(format!("{v:X}"), format!("{:X}", 200u8));
     }
 
     #[test]

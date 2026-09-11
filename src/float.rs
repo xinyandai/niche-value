@@ -97,71 +97,17 @@ macro_rules! niche_float {
                 self.get().partial_cmp(&other.get())
             }
         }
-        impl<const BITS: $bits> From<$nv<BITS>> for $prim {
-            #[inline]
-            fn from(value: $nv<BITS>) -> Self {
-                value.get()
-            }
-        }
-        impl<const BITS: $bits> core::convert::TryFrom<$prim> for $nv<BITS> {
-            type Error = TryFromFloatError;
-            #[inline]
-            fn try_from(value: $prim) -> Result<Self, Self::Error> {
-                Self::new(value).ok_or(TryFromFloatError(()))
-            }
-        }
-        impl<const BITS: $bits> core::str::FromStr for $nv<BITS> {
-            type Err = ParseFloatError;
-            #[inline]
-            fn from_str(value: &str) -> Result<Self, Self::Err> {
-                Self::new(<$prim as core::str::FromStr>::from_str(value)?).ok_or(ParseFloatError(()))
-            }
-        }
 
-        impl<const BITS: $bits> core::fmt::Debug for $nv<BITS> {
-            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-                core::fmt::Debug::fmt(&self.get(), f)
-            }
-        }
-        impl<const BITS: $bits> core::fmt::Display for $nv<BITS> {
-            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-                core::fmt::Display::fmt(&self.get(), f)
-            }
-        }
-        impl<const BITS: $bits> core::fmt::LowerExp for $nv<BITS> {
-            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-                core::fmt::LowerExp::fmt(&self.get(), f)
-            }
-        }
-        impl<const BITS: $bits> core::fmt::UpperExp for $nv<BITS> {
-            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-                core::fmt::UpperExp::fmt(&self.get(), f)
-            }
-        }
-
-        #[cfg(feature = "serde")]
-        impl<const BITS: $bits> serde::Serialize for $nv<BITS> {
-            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-                self.get().serialize(serializer)
-            }
-        }
-        #[cfg(feature = "serde")]
-        impl<'de, const BITS: $bits> serde::Deserialize<'de> for $nv<BITS> {
-            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-                let value = <$prim as serde::Deserialize>::deserialize(deserializer)?;
-                Self::new(value).ok_or_else(|| serde::de::Error::custom("bit pattern is forbidden by niche type"))
-            }
-        }
+        forward_conversions!([const BITS: $bits] $nv<BITS>, $prim, TryFromFloatError, ParseFloatError);
+        forward_fmt!([const BITS: $bits] $nv<BITS> => Debug, Display, LowerExp, UpperExp);
+        forward_serde!([const BITS: $bits] $nv<BITS>, $prim, "bit pattern is forbidden by niche type");
 
         #[doc = concat!("A [`", stringify!($prim), "`] known not to be `", stringify!($prim), "::MAX` (bit-exact).")]
         pub type $nonmax = $nv<{ $prim::MAX.to_bits() }>;
         #[doc = concat!("A [`", stringify!($prim), "`] known not to be `", stringify!($prim), "::MIN` (bit-exact).")]
         pub type $nonmin = $nv<{ $prim::MIN.to_bits() }>;
 
-        const _: () = {
-            assert!(core::mem::size_of::<$nonmax>() == core::mem::size_of::<$prim>());
-            assert!(core::mem::size_of::<Option<$nonmax>>() == core::mem::size_of::<$prim>());
-        };
+        assert_niche_layout!($nonmax, $prim);
     };
 }
 
@@ -170,10 +116,12 @@ niche_float!(NonValueF64, f64, u64, NonZeroU64, NonMaxF64, NonMinF64);
 
 // ============================ class-based family ============================
 
+/// Defines one class-based float type. `reject = |v| …` is spliced into the
+/// constructor body (not called as a closure) so that `new` can be `const fn`.
 macro_rules! niche_float_class {
     (
         $ty:ident, $prim:ident, $bits:ident, $nonzero:ident,
-        anchor = $anchor:expr, reject = $reject:expr, what = $what:literal
+        anchor = $anchor:expr, reject = |$v:ident| $reject:expr, what = $what:literal
     ) => {
         #[doc = concat!("An [`", stringify!($prim), "`] guaranteed not to be ", $what, ".")]
         ///
@@ -189,15 +137,18 @@ macro_rules! niche_float_class {
 
             #[doc = concat!("Creates a value if it is not ", $what, ", otherwise `None`.")]
             #[inline]
-            pub fn new(value: $prim) -> Option<Self> {
-                #[allow(clippy::redundant_closure_call)]
-                if ($reject)(value) {
+            pub const fn new(value: $prim) -> Option<Self> {
+                let $v = value;
+                if $reject {
                     return None;
                 }
                 // The predicate guarantees `value.to_bits() != ANCHOR` (the
                 // anchor is itself a member of the forbidden class), so the XOR
                 // is never zero and `NonZero::new` always returns `Some`.
-                core::num::$nonzero::new(value.to_bits() ^ Self::ANCHOR).map(Self)
+                match core::num::$nonzero::new(value.to_bits() ^ Self::ANCHOR) {
+                    None => None,
+                    Some(inner) => Some(Self(inner)),
+                }
             }
 
             #[doc = concat!("Creates a value without checking that it is not ", $what, ".")]
@@ -205,7 +156,7 @@ macro_rules! niche_float_class {
             /// # Safety
             #[doc = concat!("`value` must not be ", $what, ".")]
             #[inline]
-            pub unsafe fn new_unchecked(value: $prim) -> Self {
+            pub const unsafe fn new_unchecked(value: $prim) -> Self {
                 // SAFETY: caller guarantees the value is outside the forbidden
                 // class, hence `value.to_bits() != ANCHOR`.
                 Self(unsafe { core::num::$nonzero::new_unchecked(value.to_bits() ^ Self::ANCHOR) })
@@ -224,67 +175,12 @@ macro_rules! niche_float_class {
                 self.get() == other.get()
             }
         }
-        impl From<$ty> for $prim {
-            #[inline]
-            fn from(value: $ty) -> Self {
-                value.get()
-            }
-        }
-        impl core::convert::TryFrom<$prim> for $ty {
-            type Error = TryFromFloatError;
-            #[inline]
-            fn try_from(value: $prim) -> Result<Self, Self::Error> {
-                Self::new(value).ok_or(TryFromFloatError(()))
-            }
-        }
-        impl core::str::FromStr for $ty {
-            type Err = ParseFloatError;
-            #[inline]
-            fn from_str(value: &str) -> Result<Self, Self::Err> {
-                Self::new(<$prim as core::str::FromStr>::from_str(value)?)
-                    .ok_or(ParseFloatError(()))
-            }
-        }
-        impl core::fmt::Debug for $ty {
-            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-                core::fmt::Debug::fmt(&self.get(), f)
-            }
-        }
-        impl core::fmt::Display for $ty {
-            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-                core::fmt::Display::fmt(&self.get(), f)
-            }
-        }
-        impl core::fmt::LowerExp for $ty {
-            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-                core::fmt::LowerExp::fmt(&self.get(), f)
-            }
-        }
-        impl core::fmt::UpperExp for $ty {
-            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-                core::fmt::UpperExp::fmt(&self.get(), f)
-            }
-        }
 
-        #[cfg(feature = "serde")]
-        impl serde::Serialize for $ty {
-            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-                self.get().serialize(serializer)
-            }
-        }
-        #[cfg(feature = "serde")]
-        impl<'de> serde::Deserialize<'de> for $ty {
-            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-                let value = <$prim as serde::Deserialize>::deserialize(deserializer)?;
-                Self::new(value)
-                    .ok_or_else(|| serde::de::Error::custom(concat!("value is ", $what)))
-            }
-        }
+        forward_conversions!([] $ty, $prim, TryFromFloatError, ParseFloatError);
+        forward_fmt!([] $ty => Debug, Display, LowerExp, UpperExp);
+        forward_serde!([] $ty, $prim, concat!("value is ", $what));
 
-        const _: () = {
-            assert!(core::mem::size_of::<$ty>() == core::mem::size_of::<$prim>());
-            assert!(core::mem::size_of::<Option<$ty>>() == core::mem::size_of::<$prim>());
-        };
+        assert_niche_layout!($ty, $prim);
     };
 }
 
@@ -316,10 +212,18 @@ macro_rules! impl_total_ord {
         impl Ord for $ty {
             #[inline]
             fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-                // SAFETY-of-logic: this type never holds NaN, so partial_cmp is total.
-                self.get()
-                    .partial_cmp(&other.get())
-                    .expect("type invariant guarantees no NaN")
+                // Without NaN, `<`/`>` are exhaustive: exactly one of `<`, `>`,
+                // `==` holds, so this is a total order with no panic path.
+                // (`f32::total_cmp` is deliberately not used: it distinguishes
+                // `-0.0` from `+0.0`, which would disagree with `PartialEq`.)
+                let (a, b) = (self.get(), other.get());
+                if a < b {
+                    core::cmp::Ordering::Less
+                } else if a > b {
+                    core::cmp::Ordering::Greater
+                } else {
+                    core::cmp::Ordering::Equal
+                }
             }
         }
         impl core::hash::Hash for $ty {
@@ -339,7 +243,7 @@ niche_float_class!(
     u32,
     NonZeroU32,
     anchor = 0x7FC0_0000,
-    reject = |v: f32| v.is_nan(),
+    reject = |v| v.is_nan(),
     what = "`NaN`"
 );
 niche_float_class!(
@@ -348,7 +252,7 @@ niche_float_class!(
     u64,
     NonZeroU64,
     anchor = 0x7FF8_0000_0000_0000,
-    reject = |v: f64| v.is_nan(),
+    reject = |v| v.is_nan(),
     what = "`NaN`"
 );
 impl_total_ord!(NonNanF32, f32);
@@ -360,7 +264,7 @@ niche_float_class!(
     u32,
     NonZeroU32,
     anchor = 0x7F80_0000,
-    reject = |v: f32| v.is_infinite(),
+    reject = |v| v.is_infinite(),
     what = "infinite"
 );
 niche_float_class!(
@@ -369,7 +273,7 @@ niche_float_class!(
     u64,
     NonZeroU64,
     anchor = 0x7FF0_0000_0000_0000,
-    reject = |v: f64| v.is_infinite(),
+    reject = |v| v.is_infinite(),
     what = "infinite"
 );
 impl_partial_ord!(NonInfF32);
@@ -381,7 +285,7 @@ niche_float_class!(
     u32,
     NonZeroU32,
     anchor = 0x0000_0000,
-    reject = |v: f32| v == 0.0,
+    reject = |v| v == 0.0,
     what = "zero"
 );
 niche_float_class!(
@@ -390,7 +294,7 @@ niche_float_class!(
     u64,
     NonZeroU64,
     anchor = 0x0000_0000_0000_0000,
-    reject = |v: f64| v == 0.0,
+    reject = |v| v == 0.0,
     what = "zero"
 );
 impl_partial_ord!(NonZeroF32);
@@ -402,7 +306,7 @@ niche_float_class!(
     u32,
     NonZeroU32,
     anchor = 0x7FC0_0000,
-    reject = |v: f32| !v.is_finite(),
+    reject = |v| !v.is_finite(),
     what = "non-finite (`NaN` or infinite)"
 );
 niche_float_class!(
@@ -411,7 +315,7 @@ niche_float_class!(
     u64,
     NonZeroU64,
     anchor = 0x7FF8_0000_0000_0000,
-    reject = |v: f64| !v.is_finite(),
+    reject = |v| !v.is_finite(),
     what = "non-finite (`NaN` or infinite)"
 );
 impl_total_ord!(FiniteF32, f32);
@@ -423,7 +327,7 @@ niche_float_class!(
     u32,
     NonZeroU32,
     anchor = 0x0000_0001,
-    reject = |v: f32| v.is_subnormal(),
+    reject = |v| v.is_subnormal(),
     what = "subnormal"
 );
 niche_float_class!(
@@ -432,28 +336,45 @@ niche_float_class!(
     u64,
     NonZeroU64,
     anchor = 0x0000_0000_0000_0001,
-    reject = |v: f64| v.is_subnormal(),
+    reject = |v| v.is_subnormal(),
     what = "subnormal"
 );
 impl_partial_ord!(NonSubnormalF32);
 impl_partial_ord!(NonSubnormalF64);
 
+// Every anchor must be a member of the class its type rejects; otherwise the
+// anchor would be constructible and `new` could build a `NonZero(0)`.
+const _: () = {
+    assert!(f32::from_bits(NonNanF32::ANCHOR).is_nan());
+    assert!(f64::from_bits(NonNanF64::ANCHOR).is_nan());
+    assert!(f32::from_bits(NonInfF32::ANCHOR).is_infinite());
+    assert!(f64::from_bits(NonInfF64::ANCHOR).is_infinite());
+    assert!(f32::from_bits(NonZeroF32::ANCHOR) == 0.0);
+    assert!(f64::from_bits(NonZeroF64::ANCHOR) == 0.0);
+    assert!(!f32::from_bits(FiniteF32::ANCHOR).is_finite());
+    assert!(!f64::from_bits(FiniteF64::ANCHOR).is_finite());
+    assert!(f32::from_bits(NonSubnormalF32::ANCHOR).is_subnormal());
+    assert!(f64::from_bits(NonSubnormalF64::ANCHOR).is_subnormal());
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use core::mem::size_of;
+    use std::collections::{BTreeSet, HashSet};
+    use std::{format, vec, vec::Vec};
 
     // Shared contract checks for the NaN-free float types: a total `Ord` and the
     // `-0.0`-normalized `Hash`. Both `NonNan*` and `Finite*` must satisfy them,
     // so exercising them through one helper stops a future contract change from
     // leaving either type under-tested.
-    #[cfg(feature = "std")]
     fn assert_total_order_f64<T: Ord + Copy>(new: impl Fn(f64) -> T, get: impl Fn(&T) -> f64) {
-        use std::collections::BTreeSet;
         let a = new(-1.0);
         let b = new(0.0);
         let c = new(2.5);
         assert!(a < b && b < c);
+        assert_eq!(a.cmp(&a), core::cmp::Ordering::Equal);
+        assert_eq!(c.cmp(&a), core::cmp::Ordering::Greater);
 
         let mut set: BTreeSet<T> = BTreeSet::new();
         set.insert(c);
@@ -463,11 +384,9 @@ mod tests {
         assert_eq!(sorted, vec![-1.0, 0.0, 2.5]);
     }
 
-    #[cfg(feature = "std")]
     fn assert_signed_zero_eq_hash_f32<T: Eq + core::hash::Hash + Copy + core::fmt::Debug>(
         new: impl Fn(f32) -> T,
     ) {
-        use std::collections::HashSet;
         // +0.0 and -0.0 compare and hash equal, so -0.0 must collide in the set.
         let mut hs: HashSet<T> = HashSet::new();
         assert!(hs.insert(new(0.0)));
@@ -481,6 +400,8 @@ mod tests {
         assert!(NonMaxF32::new(f32::MAX).is_none());
         assert!(NonMinF32::new(f32::MIN).is_none());
         assert_eq!(NonMaxF32::new(f32::INFINITY).unwrap().get(), f32::INFINITY);
+        assert!(NonMaxF64::new(f64::MAX).is_none());
+        assert!(NonMinF64::new(f64::MIN).is_none());
     }
 
     #[test]
@@ -499,6 +420,8 @@ mod tests {
         // a different (signaling-ish) NaN bit pattern is also rejected
         assert!(NonNanF32::new(f32::from_bits(0x7F80_0001)).is_none());
         assert!(NonNanF32::new(f32::from_bits(0xFFFF_FFFF)).is_none());
+        assert!(NonNanF64::new(f64::NAN).is_none());
+        assert!(NonNanF64::new(f64::from_bits(0xFFFF_FFFF_FFFF_FFFF)).is_none());
         // infinities are NOT NaN, so allowed
         assert_eq!(NonNanF32::new(f32::INFINITY).unwrap().get(), f32::INFINITY);
         assert_eq!(NonNanF32::new(-2.5).unwrap().get(), -2.5);
@@ -508,16 +431,22 @@ mod tests {
     fn noninf_rejects_both_infinities_but_keeps_nan() {
         assert!(NonInfF32::new(f32::INFINITY).is_none());
         assert!(NonInfF32::new(f32::NEG_INFINITY).is_none());
+        assert!(NonInfF64::new(f64::INFINITY).is_none());
+        assert!(NonInfF64::new(f64::NEG_INFINITY).is_none());
         // NaN is not infinite, so allowed (and thus NonInf is NOT Eq/Ord)
         assert!(NonInfF64::new(f64::NAN).unwrap().get().is_nan());
         assert_eq!(NonInfF32::new(3.0).unwrap().get(), 3.0);
     }
 
     #[test]
-    #[cfg(feature = "std")] // ordered/hashed containers
     fn nonnan_is_totally_ordered_and_hashable() {
         assert_total_order_f64(|v| NonNanF64::new(v).unwrap(), |x| x.get());
         assert_signed_zero_eq_hash_f32(|v| NonNanF32::new(v).unwrap());
+        // Infinities are allowed and sit at the ends of the order.
+        let lo = NonNanF64::new(f64::NEG_INFINITY).unwrap();
+        let hi = NonNanF64::new(f64::INFINITY).unwrap();
+        assert!(lo < NonNanF64::new(f64::MIN).unwrap());
+        assert!(hi > NonNanF64::new(f64::MAX).unwrap());
     }
 
     #[test]
@@ -546,6 +475,11 @@ mod tests {
             NonZeroF32::new(f32::MIN_POSITIVE).unwrap().get(),
             f32::MIN_POSITIVE
         );
+        // the smallest subnormal is nonzero and must round-trip bit-exactly
+        assert_eq!(
+            NonZeroF32::new(f32::from_bits(1)).unwrap().get().to_bits(),
+            1
+        );
         assert!(NonZeroF64::new(f64::NAN).unwrap().get().is_nan());
         assert_eq!(NonZeroF32::new(f32::INFINITY).unwrap().get(), f32::INFINITY);
         assert_eq!(size_of::<Option<NonZeroF32>>(), size_of::<f32>());
@@ -566,12 +500,12 @@ mod tests {
         assert_eq!(FiniteF32::new(1.5).unwrap().get(), 1.5);
         assert_eq!(FiniteF64::new(-2.5).unwrap().get(), -2.5);
         assert_eq!(FiniteF32::new(0.0).unwrap().get(), 0.0);
+        assert_eq!(FiniteF32::new(f32::MAX).unwrap().get(), f32::MAX);
         assert_eq!(size_of::<Option<FiniteF32>>(), size_of::<f32>());
         assert_eq!(size_of::<Option<FiniteF64>>(), size_of::<f64>());
     }
 
     #[test]
-    #[cfg(feature = "std")] // ordered/hashed containers
     fn finite_is_totally_ordered_and_hashable() {
         assert_total_order_f64(|v| FiniteF64::new(v).unwrap(), |x| x.get());
         assert_signed_zero_eq_hash_f32(|v| FiniteF32::new(v).unwrap());
@@ -611,14 +545,42 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "std")] // uses `format!`
+    fn const_context() {
+        const V: NonNanF32 = match NonNanF32::new(2.5) {
+            Some(v) => v,
+            None => panic!(),
+        };
+        const G: f32 = V.get();
+        assert_eq!(G, 2.5);
+        const REJECTED: Option<FiniteF64> = FiniteF64::new(f64::INFINITY);
+        assert!(REJECTED.is_none());
+        const BIT_EXACT: Option<NonMaxF32> = NonMaxF32::new(f32::MAX);
+        assert!(BIT_EXACT.is_none());
+    }
+
+    #[test]
     fn fmt_and_parse() {
         let v = NonNanF64::new(1.5).unwrap();
         assert_eq!(format!("{v}"), "1.5");
+        assert_eq!(format!("{v:?}"), "1.5");
         assert_eq!(format!("{v:e}"), format!("{:e}", 1.5f64));
+        assert_eq!(format!("{v:E}"), format!("{:E}", 1.5f64));
         let p: NonNanF32 = "2.5".parse().unwrap();
         assert_eq!(p.get(), 2.5);
         assert!("NaN".parse::<NonNanF32>().is_err());
+        assert!("inf".parse::<FiniteF32>().is_err());
+        assert!("abc".parse::<NonMaxF32>().is_err());
+        let b: NonMaxF32 = "1e3".parse().unwrap();
+        assert_eq!(b.get(), 1000.0);
+    }
+
+    #[test]
+    fn conversions() {
+        use core::convert::TryFrom;
+        assert_eq!(f32::from(NonNanF32::new(1.5).unwrap()), 1.5);
+        assert_eq!(NonNanF32::try_from(1.5).unwrap().get(), 1.5);
+        NonNanF32::try_from(f32::NAN).unwrap_err();
+        NonMaxF64::try_from(f64::MAX).unwrap_err();
     }
 
     #[test]
@@ -628,6 +590,9 @@ mod tests {
         let bytes = bincode::serialize(&v).unwrap();
         let back: NonNanF64 = bincode::deserialize(&bytes).unwrap();
         assert_eq!(v, back);
+        // a forbidden value fails to deserialize
+        let bad = bincode::serialize(&f64::NAN).unwrap();
+        assert!(bincode::deserialize::<NonNanF64>(&bad).is_err());
     }
 
     #[test]

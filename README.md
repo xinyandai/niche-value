@@ -105,12 +105,14 @@ compiler features and are out of scope; this crate is stable-only.
 
 ## Features
 
-- `std` (default) — implements `std::error::Error` for the error types.
 - `serde` — `Serialize`/`Deserialize` for every type. Floats (de)serialize by
   value like the primitive; exact bit identity (NaN payload, signed zero)
   survives only on IEEE-bit-preserving formats such as bincode.
+- `std` (default) — no-op, kept for backwards compatibility.
 
-Disable default features for `#![no_std]`.
+The crate is `#![no_std]` with no feature gymnastics required: every
+constructor is `const fn`, and the error types implement `core::error::Error`
+unconditionally.
 
 ## MSRV
 
