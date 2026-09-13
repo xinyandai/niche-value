@@ -51,12 +51,23 @@
 //!
 //! # Features
 //!
-//! * `std` (default): implements [`std::error::Error`] for the error types.
-//!   Disable for `#![no_std]`.
 //! * `serde`: `Serialize`/`Deserialize` for every type.
+//! * `std` (default): kept for backwards compatibility and currently a no-op.
+//!   The crate is `#![no_std]`; the error types implement
+//!   [`core::error::Error`] regardless of features.
 
-#![cfg_attr(not(feature = "std"), no_std)]
+#![no_std]
 #![warn(missing_docs)]
+#![deny(unsafe_op_in_unsafe_fn)]
+
+// The unit tests use `format!`, `Vec` and the std collections. Linking std
+// only under `cfg(test)` keeps the library itself `no_std` while letting the
+// whole suite run under `--no-default-features`.
+#[cfg(test)]
+extern crate std;
+
+#[macro_use]
+mod macros;
 
 mod error;
 mod float;

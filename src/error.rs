@@ -4,6 +4,10 @@
 //! `TryFromIntError` / `ParseIntError` (which themselves mirror the
 //! `core::num` types) so that code written against `nonmax` keeps compiling.
 //! The float error types mirror `core::num::ParseFloatError` naming.
+//!
+//! All four implement [`core::error::Error`] unconditionally (the trait has
+//! lived in `core` since Rust 1.81, below this crate's MSRV), so they work in
+//! `no_std` builds without any feature flag.
 
 /// Error returned when a checked integral conversion fails (mirrors
 /// [`core::num::TryFromIntError`]).
@@ -28,8 +32,7 @@ impl From<core::convert::Infallible> for TryFromIntError {
     }
 }
 
-#[cfg(feature = "std")]
-impl std::error::Error for TryFromIntError {}
+impl core::error::Error for TryFromIntError {}
 
 /// Error returned when an integer string cannot be parsed into a niche integer
 /// (mirrors [`core::num::ParseIntError`]).
@@ -48,11 +51,11 @@ impl From<core::num::ParseIntError> for ParseIntError {
     }
 }
 
-#[cfg(feature = "std")]
-impl std::error::Error for ParseIntError {}
+impl core::error::Error for ParseIntError {}
 
-/// Error returned when a checked `f32`/`f64` conversion fails (the value was the
-/// forbidden bit pattern, or `NaN`/`±inf` for the class-based types).
+/// Error returned when a checked `f32`/`f64` conversion fails: the value was the
+/// forbidden bit pattern, or (for the class-based types) a member of the
+/// forbidden class such as `NaN`, `±inf`, `±0.0` or a subnormal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TryFromFloatError(pub(crate) ());
 
@@ -62,8 +65,7 @@ impl core::fmt::Display for TryFromFloatError {
     }
 }
 
-#[cfg(feature = "std")]
-impl std::error::Error for TryFromFloatError {}
+impl core::error::Error for TryFromFloatError {}
 
 /// Error returned when a float string cannot be parsed into a niche float
 /// (mirrors [`core::num::ParseFloatError`] naming).
@@ -82,5 +84,4 @@ impl From<core::num::ParseFloatError> for ParseFloatError {
     }
 }
 
-#[cfg(feature = "std")]
-impl std::error::Error for ParseFloatError {}
+impl core::error::Error for ParseFloatError {}
