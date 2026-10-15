@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 env:
   CARGO_TERM_COLOR: always
@@ -11,6 +12,7 @@ env:
 
 jobs:
   test:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     name: test (stable)
     runs-on: ubuntu-latest
     steps:
@@ -23,6 +25,7 @@ jobs:
       - run: cargo test --no-default-features --features serde # serde without std
 
   msrv:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     name: build (MSRV 1.83)
     runs-on: ubuntu-latest
     steps:
@@ -32,6 +35,7 @@ jobs:
       - run: cargo build --no-default-features
 
   fmt:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     name: rustfmt
     runs-on: ubuntu-latest
     steps:
@@ -42,6 +46,7 @@ jobs:
       - run: cargo fmt --all --check
 
   clippy:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     name: clippy
     runs-on: ubuntu-latest
     steps:
@@ -52,6 +57,7 @@ jobs:
       - run: cargo clippy --all-features --all-targets
 
   miri:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     name: miri
     runs-on: ubuntu-latest
     steps:
@@ -62,6 +68,7 @@ jobs:
       - run: cargo miri test --all-features
 
   docs:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     name: docs
     runs-on: ubuntu-latest
     env:
